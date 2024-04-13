@@ -1,0 +1,364 @@
+//////////////////////////////////////////
+//////////////////////////////////////////
+//////PART 1. Getting SNOW COVER DATA/////
+/////////////////////////////////////////
+////////////////////////////////////////
+// Get country boundary (Denmark example)
+var countries = ee.FeatureCollection('USDOS/LSIB_SIMPLE/2017');
+var current_country = countries.filter(ee.Filter.eq('country_na', 'Denmark'));
+Map.centerObject(current_country);
+
+// Cloud masking function
+function cloudMask(image) {
+  // Check for the presence of the 'NDSI_Snow_Cover' band
+  if (!image.bandNames().contains('NDSI_Snow_Cover')) {
+    print('The NDSI_Snow_Cover band is missing in the image ' + image.id());
+    return image; 
+  }
+  
+  var ndsi = image.select('NDSI_Snow_Cover'); // Load the NDSI band
+  
+  // Define the cloud quality bit
+  var cloudBitMask = ee.Number(1).byte().leftShift(250); // Bit 250 corresponds to clouds
+  
+  // Create a mask for clouds
+  var mask = ndsi.bitwiseAnd(cloudBitMask).eq(0); // 0 means no clouds
+  
+  // Apply the mask to the NDSI band
+  var ndsiMasked = ndsi.updateMask(mask);
+  
+  return image.updateMask(mask);
+}
+
+var modis_col = ee.ImageCollection("MODIS/061/MOD10A1")
+ .select('NDSI_Snow_Cover')
+ .map(function(image){return image.clip(current_country)})
+ .filterDate("2001-01-01", "2024-01-01")
+
+// Function to compute the average NDSI for a year and month
+var YearlyNDSI_Month = function(year, month) {
+  // Filter MODIS images by the current year
+  var modisMonthly = modis_col
+    .filter(ee.Filter.calendarRange(year, year, 'year'))
+    .filter(ee.Filter.calendarRange(month, month, 'month'));
+  // Apply cloud mask
+  modisMonthly = modisMonthly.map(cloudMask);
+  // Get the median image for the month
+  var meanNDSI = modisMonthly.median();
+
+  // Set properties to track the year
+  var MonthYear_mean = meanNDSI
+    .set('Year', year)
+    .set('Month', month)
+    .set('start_year', ee.Date.fromYMD(year, month, 1));
+ 
+  return MonthYear_mean;
+};
+
+// Define date of earliest available data
+var start_date = ee.Date(modis_col.first().get('system:time_start'));
+// Convert starting date into year as a number
+var start_year = ee.Number.parse(start_date.format('YYYY'));
+// Define years as a sequence from the first year with available data until 2019
+var years = ee.List.sequence(start_year, 2020);
+// User input for the month (e.g., January = 1)
+var inputMonth = 1;
+
+// Create a collection of average NDSI images for the specified month of each year
+var yearlySnowCover_Month = ee.ImageCollection.fromImages(years.map(function(year) {
+  return YearlyNDSI_Month(year, inputMonth);
+}));
+print(yearlySnowCover_Month, 'yearlySnowCover_Month')
+// Map the result
+Map.addLayer(yearlySnowCover_Month, {min: 0, max: 100, palette: ['white', 'blue']}, 'Yearly Snow Cover for Month ' + inputMonth);
+////////////////////////////////////////
+//////////////PART 2 ///////////////////
+////////////Snow Cover Animation/////////
+////////////////////////////////////////
+//Option 1 - GIF animation
+// Define  visualization parameters.
+var visParams = {
+  min: 0.0,
+  max: 100.0,
+  palette: ['FFFFFF', 'ADD8E6', '6495ED', '0000FF'],
+};
+
+// Create images for use as animation frames.
+var rgbVis = yearlySnowCover_Month.map(function(img) {
+  return img.visualize(visParams);
+});
+
+// Define GIF visualization parameters.
+var gifParams = {
+  'region': current_country.geometry(),
+  'dimensions': 600,
+   'crs': 'EPSG:3857',
+  'framesPerSecond': 1
+};
+
+// Print the GIF URL to the console.
+print(rgbVis.getVideoThumbURL(gifParams));
+
+/////////////
+//Option 2 animation
+/////////////
+// Define some packages for visualisation of the video
+var animation = require('users/gena/packages:animation');
+var text = require('users/gena/packages:text');
+
+// Define video
+var MODIS_annual_video =  yearlySnowCover_Month.map(function(image){
+  // Define date of image as label
+ // var label = image.get('Year');
+  // Output image with pre-defined bands and values
+  return image.visualize({
+    bands: ['NDSI_Snow_Cover'],
+    min: 0,
+    max: 100,
+    palette: ['FFFFFF', 'ADD8E6', '6495ED', '0000FF']
+  })//.set({label: label});
+});
+
+// Define annotation properties
+//var annotations_properties = [{
+  //  position: 'left', offset: '2%', margin: '2%', 
+  //  property: 'label', scale: Map.getScale() * 2}];
+
+// Add annotations
+//MODIS_annual_video = MODIS_annual_video.map(function(image) {
+//  return mage(image, {}, current_country);
+//});
+
+// Map video with all images available "MODIS_annual_video.size()"
+animation.animate(MODIS_annual_video, {maxFrames: MODIS_annual_video.size()});
+
+////////////////////////////////////////
+//////////////PART 3 ///////////////////
+////////////Snow Cover Calculations/////////
+////////////////////////////////////////
+var time_start = '2021-01-01', time_end = '2021-01-31'
+
+var modis = ee.ImageCollection("MODIS/061/MOD10A1")
+ .select('NDSI_Snow_Cover')
+ .map(function(image){return image.clip(current_country)})
+ .filterDate(time_start, time_end);
+ 
+print(modis);
+// Load the MODIS land cover dataset
+var lc = ee.ImageCollection("MODIS/061/MCD12Q1").select('LC_Type1');
+
+// Filter the water bodies (class 17)
+var wb = lc.map(function(image) {
+  return image.eq(17).not();
+}).sum(); // Summing up over time to get a single image representing water bodies
+
+// Add the water bodies layer to the map
+Map.addLayer(wb.clip(current_country), {palette: 'blue'}, "Water Bodies", false);
+ 
+var modis_masked = modis.map(cloudMask); //apply cloud mask
+ 
+var NDSI_mean = modis.median().updateMask(wb);
+Map.addLayer(NDSI_mean, {min: 0, max: 100, palette: ['FFFFFF', 'ADD8E6', '6495ED', '0000FF']}, "NDSI_NoWater", false);
+
+//set a treshold
+var thr = NDSI_mean.gt(10); //greater then 10 pixels
+
+var mask = thr.updateMask(thr);
+
+var area = mask.multiply(ee.Image.pixelArea().divide(1e6));
+print(area)
+Map.addLayer(area, [],'area',false);
+
+//calculate snow cover area
+var snow_area = ee.Number(area.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: current_country,
+  scale: 500,
+  maxPixels: 1e13
+  }).values().get(0))
+  
+print('snow cover area km2', snow_area)
+
+var ndsi = modis.map(function(img){
+  var mask_water = img.updateMask(wb)
+  var ndsi_thr = mask_water.gt(10);
+  var ndsi_mask = ndsi_thr.updateMask(ndsi_thr);
+  var ndsi_area = ndsi_mask.multiply(ee.Image.pixelArea().divide(1e6));
+  return ndsi_area
+  .copyProperties(img, img.propertyNames())
+  });
+  
+// Create the time series chart with x and y-axis labels
+var snow_chart = ui.Chart.image.series({
+  imageCollection: ndsi,
+  region: current_country,
+  reducer: ee.Reducer.sum(),
+  scale: 500,
+  xProperty: 'system:time_start'
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'Snow cover Time Series',
+    hAxis: {title: 'Time'},
+    vAxis: {title: 'Snow Cover Area (sq.km)'}
+});
+
+// Print the chart
+print(snow_chart);
+////////////////////////////////////////
+//////////////PART 4 ///////////////////
+////////////Get temperature data/////////
+////////////////////////////////////////
+// Function to apply a mask based on bit 0 of the LST Day quality flag
+var applyMask = function(image) {
+  // Get the QC_Day quality flag image
+var qcDay = image.select('QC_Day');
+  
+// Create a mask, retaining only values with bit 0
+var mask = qcDay.bitwiseAnd(1); // Выбираем бит 0
+  
+// Apply mask 
+var lstDayMasked = image.updateMask(mask);
+  
+return lstDayMasked;
+};
+
+// Load MODIS Daily temperature collection
+var temperatureCollection = ee.ImageCollection('MODIS/061/MOD11A1')
+  .select('LST_Day_1km', 'QC_Day') 
+  .map(function(image){return image.clip(current_country)}) 
+  .filterDate("2001-01-01", "2021-01-01"); 
+  
+// Applly mask
+var temperatureCollectionMaskedDay = temperatureCollection.map(applyMask);
+print(temperatureCollectionMaskedDay.limit(20));
+
+// Define date of earliest available data
+var start_date_t = ee.Date(temperatureCollectionMaskedDay.first().get('system:time_start'));
+// Convert starting date into year as a number
+var start_year_t = ee.Number.parse(start_date_t.format('YYYY'));
+// Define years as a sequence from the first year with available data until 2019
+var years_t = ee.List.sequence(start_year_t, 2020);
+
+// Create an ImageCollection of average images for each January in each year
+var Temperature_annual = ee.ImageCollection.fromImages(
+    years_t.map(function(year) {
+
+// Filter the collection for January of each year
+var current_year_t = temperatureCollectionMaskedDay
+            .filter(ee.Filter.calendarRange(year, year, 'year'))
+            .filter(ee.Filter.calendarRange(1, 1, 'month'));
+        
+// Check the number of images for January
+  var january_size = current_year_t.size();
+        
+// Find the middle image of the January collection
+  var january_size_div = january_size.divide(2);
+  var january_size_div_round = january_size_div.round();
+  var curent_january_list = current_year_t.toList(january_size);
+  var current_mid_january = curent_january_list.get(january_size_div_round);
+        
+// Return the median of the current January and set the year, number of images, and
+// copy the properties of the system time of the first image in the year
+   return current_year_t
+            .median()
+            .set('Year', year)
+            .set('Month', 1) // Set the month
+            .set('No_of_images', january_size)
+            .copyProperties(ee.Image(current_mid_january), ['system:time_start']);
+    })
+);
+
+// Print the result
+print('Temperature_annual', Temperature_annual);
+
+// Function to convert temperature values from Kelvin to Celsius and compute the mean temperature
+var convertKelvinToCelsiusAndComputeMean = function(image) {
+  // Get the temperature image
+  var temperature = image.select('LST_Day_1km');
+  
+  // Convert temperature from Kelvin to Celsius
+  var temperatureCelsius = temperature.multiply(0.02).subtract(273.15);
+  
+  // Compute the mean temperature for January
+  var meanTemperature = temperatureCelsius.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: current_country.geometry(),
+    scale: 1000
+  }).get('LST_Day_1km');
+  
+  // Add the mean temperature to the 'mean_temperature' property
+  return image.addBands(temperatureCelsius.rename('LST_Day_Celsius'))
+              .set('mean_temperature', meanTemperature);
+};
+
+// Apply the function to the ImageCollection of average images
+var Temperature_annual_Celsius_Mean = Temperature_annual.map(convertKelvinToCelsiusAndComputeMean);
+
+// Print the result
+print('Temperature_annual_Celsius_Mean', Temperature_annual_Celsius_Mean);
+
+////////////////////////////////////////
+//////////////PART 5 ///////////////////
+////////////Time-series Analysis/////////
+////////////////////////////////////////
+// mean_temperature chart
+var temperatureChart = ui.Chart.feature.byFeature({
+  features: Temperature_annual_Celsius_Mean,
+  xProperty: 'Year',
+  yProperties: ['mean_temperature']
+}).setChartType('ScatterChart')
+  .setOptions({
+    title: 'Yearly mean temperature change in Denmark in January',
+    colors: ['red'],
+    pointSize: 3,
+    lineWidth: 1,
+    vAxis: {
+      title: 'Mean Temperature (°C)',
+      gridlines: {color: '#f0f0f0'}
+    },
+    hAxis: {
+      title: 'Year',
+      gridlines: {color: '#f0f0f0'},
+      format: '####', // Remove commas from the year values
+      ticks: [2005, 2010, 2015, 2020] // Set zears
+    },
+    trendlines: {
+      0: {
+        type: 'linear', 
+        color: 'blue', 
+        lineWidth: 1,
+        pointSize: 0,
+        visibleInLegend: true,
+        labelInLegend: 'Temperature Trend',
+      }
+    },
+  });
+
+// print chart
+print('temperatureChart', temperatureChart);
+
+//Snow cover chart
+// Yearly Mean NDSI change chart
+// Get the value of the 'country_na' property from this object
+var countryName = ee.String(current_country.first().get('country_na'));
+
+var snowCoverChart = ui.Chart.image.series({
+  imageCollection: yearlySnowCover_Month, // NDSI collection
+  region: current_country.geometry(), 
+  reducer: ee.Reducer.mean(), 
+  scale: 500,
+  xProperty: 'start_year'
+}).setOptions({
+  title: 'Yearly Mean NDSI change in ' + countryName.getInfo() + ' in January', 
+  hAxis: {title: 'Year'}, 
+  vAxis: {title: 'Mean NDSI'},
+  pointSize: 3,
+  lineSize: 1,
+  series: {
+    0: {color: 'blue', lineWidth: 1} 
+  },
+  legend: {position: 'none'},
+  trendlines: {0: {color: 'red'}}
+});
+
+print('snowCoverChart', snowCoverChart);
