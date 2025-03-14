@@ -1,48 +1,175 @@
-# Sentinel-1 Backscatter Extraction using Google Earth Engine
+/* ==================================================================================
+                      SENTINEL-1 BACKSCATTER EXTRACTION SCRIPT 
+                     FOR STATION DATA ANALYSIS - USER'S SCRIPT
+                      
+   The goal of this script is to preprocess Sentinel-1 SAR data and extract backscatter
+   values (VH polarization) at specific station locations within a defined region of 
+   interest (ROI). The script uses the Google Earth Engine (GEE) platform for data 
+   processing and exports the results to Google Drive as a CSV file for further analysis.
+  
+   Below is a detailed explanation of each part of the code and the helper functions 
+   defined for the analysis.
+ ================================================================================== */
 
-## Overview
-This script processes Sentinel-1 SAR data to extract backscatter values (VH polarization) at specific station locations within a defined Region of Interest (ROI). The preprocessing and data extraction are conducted on the Google Earth Engine (GEE) platform, and the final results are exported as a CSV file for further analysis.
+// Step 1: Load station data as a FeatureCollection
+// The stations are loaded from a feature collection stored in GEE assets. This contains 
+// the station locations (longitude and latitude) that will be used to extract SAR backscatter 
+// values from Sentinel-1 images.
+var stations = ee.FeatureCollection('projects/fast-art-440308-i4/assets/Stations_snow');
 
-## Preprocessing Reference
-The preprocessing of Sentinel-1 SAR data was originally implemented using a script developed by the following authors:
-- Mullissa A., Vollrath A., Braun C., Slagter B., Balling J., Gou Y., Gorelick N., Reiche J.
+// Step 2: Create geometries from lon/lat properties
+// For each station, a point geometry is created from the longitude and latitude properties.
+// These geometries are then added to the station features in the collection.
+var stationsWithGeometry = stations.map(function(feature) {
+  var lon = feature.get('lon');
+  var lat = feature.get('lat');
+  var stationName = feature.get('station_name');
+  var point = ee.Geometry.Point([lon, lat]);
+  return feature.setGeometry(point).set({'station_name': stationName});
+});
 
-The original JavaScript preprocessing script can be found here:
-- **File:** `S1_ARD_TEST/wrapper.js`
-- **Version:** v1.2
-- **Date:** 2021-04-01
-- **GitHub Repository:** [https://github.com/adugnag/gee_s1_ard](https://github.com/adugnag/gee_s1_ard)
+// Step 3: Create a MultiPoint geometry and bounding polygon for ROI
+// A MultiPoint geometry is created using all station points to define a region of interest 
+// (ROI). A bounding polygon is then created around this region to define the area for further 
+// data processing.
+// Get unique station names and count
+// Extract coordinates and station names
+var coords = stationsWithGeometry.map(function(feature) {
+  return ee.Feature(null, {
+    'coords': feature.geometry().coordinates(),
+    'station_name': feature.get('station_name')
+  });
+});
+//var stationNamesList = stationsWithGeometry.aggregate_array('station_name');
+var coordsList = coords.aggregate_array('coords')
+// Create MultiPoint geometry and bounding polygon
+var multiPointROI = ee.Geometry.MultiPoint(coordsList);
+var roi = multiPointROI.bounds();  // Bounding polygon around all points
 
-## Script Functionality
-This script operates on preprocessed Sentinel-1 data and allows:
-- Filtering the dataset by orbit and platform.
-- Extracting backscatter values (VH polarization) at station locations.
-- Exporting the processed data as a CSV file to Google Drive for further analysis.
+// Step 4: Load Copernicus DEM (Digital Elevation Model) and clip to ROI
+// The Copernicus GLO30 DEM dataset is loaded to provide elevation data for terrain correction 
+// during Sentinel-1 preprocessing. The DEM is clipped to the defined ROI to focus on the area 
+// of interest.
+var copernicusDEM = ee.ImageCollection("COPERNICUS/DEM/GLO30")
+  .select('DEM')
+  .mosaic()
+  .clip(roi);
 
-## Usage Instructions
-### Running the Script in Google Earth Engine
-1. Open the Google Earth Engine Code Editor.
-2. Load the script from the following link:  
-   [Run Script on GEE](https://code.earthengine.google.com/users/traveldetective2/HiWi)
-3. Define your Region of Interest (ROI) and station locations.
-4. Set the required filters for orbit, platform, and date range.
-5. Run the script to extract backscatter values.
-6. Export the results as a CSV file to Google Drive.
+// Step 5: Load Sentinel-1 processing library
+// A custom wrapper library for Sentinel-1 backscatter processing is loaded to preprocess 
+// the Sentinel-1 data (e.g., applying speckle filtering, terrain flattening).
+var wrapper = require('users/traveldetective2/backscatter:gee');
+var helper = require('users/adugnagirma/gee_s1_ard:utilities');
+// Step 6: User-defined parameters
+// The following parameters are defined by the user and can be adjusted based on the analysis 
+// needs:
+// - `START_DATE`: The start date for the Sentinel-1 time series (e.g., "2017-01-01").
+// - `STOP_DATE`: The end date for the Sentinel-1 time series (e.g., "2021-12-31").
+// - `ORBIT`: The orbit direction of the Sentinel-1 data (either 'ASCENDING' or 'DESCENDING').
+// - `POLARIZATION`: The polarization used (here it's 'VH').
+// The user is encouraged to adjust these parameters for different date ranges, orbit types, or polarization settings as required.
+var parameter = {
+  START_DATE: "2017-01-01",    // User-defined start date
+  STOP_DATE: "2021-12-31",     // User-defined end date
+  POLARIZATION: 'VH',          // VH polarization for backscatter data
+  ORBIT: 'DESCENDING',         // User-defined orbit (e.g., 'DESCENDING')
+  GEOMETRY: roi,   // The region of interest (ROI) based on the station locations
+  APPLY_ADDITIONAL_BORDER_NOISE_CORRECTION: true,
+  APPLY_SPECKLE_FILTERING: true,
+  SPECKLE_FILTER_FRAMEWORK: 'MULTI',
+  SPECKLE_FILTER: 'GAMMA MAP', // Speckle filtering method
+  SPECKLE_FILTER_KERNEL_SIZE: 9,
+  SPECKLE_FILTER_NR_OF_IMAGES: 10,
+  APPLY_TERRAIN_FLATTENING: true,
+  DEM: copernicusDEM,           // DEM for terrain flattening
+  TERRAIN_FLATTENING_MODEL: 'VOLUME',
+  TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER: 0,
+  FORMAT: 'DB',
+  CLIP_TO_ROI: true,
+  SAVE_ASSETS: false
+};
 
-## Output
-The output file will be in CSV format and include:
-- **Date**
-- **Station Code**
-- **Backscatter VH values**
+// Step 7: Preprocess Sentinel-1 data
+// The Sentinel-1 data is preprocessed using the parameters defined above. This includes 
+// applying speckle filtering, terrain flattening, and clipping to the ROI based on the user's 
+// defined settings.
+var s1_preprocessed = wrapper.s1_preproc(parameter);
+var s1 = s1_preprocessed[0];
 
-This CSV file can be further processed for analysis in Python, R, or any statistical software.
+// Step 8: List available orbits
+var listOrbits = s1.aggregate_array('relativeOrbitNumber_start').distinct();
+print('Available Orbits:', listOrbits);
 
-## License
-This project is open-source and follows the original licensing of the referenced preprocessing script.
+// Automatically select an orbit from the available list
+// Example: we can pick the first available orbit (or choose based on specific logic)
+var selectedOrbit = listOrbits.get(1);  // Automatically select the first available orbit, can be changed accoeding to the list
 
-## Contact
-For any questions or issues, please raise an issue on this GitHub repository or contact the script author.
+// Print the selected orbit number
+print('Selected Orbit:', selectedOrbit);
 
----
-**Author:** Your Name  
-**Date:** YYYY-MM-DD
+// Now filter the Sentinel-1 collection based on the selected orbit and platform
+//var selectedPlatform = 'A';  // User can select platform 'A' or 'B'
+
+// Filter Sentinel-1 based on selected orbit and platform
+var filtered_s1 = s1.filter(ee.Filter.eq('relativeOrbitNumber_start', selectedOrbit));
+                    //.filter(ee.Filter.eq('platform_number', selectedPlatform));
+
+// Step 9: Extract VH backscatter values at station locations
+// For each image in the filtered collection, the backscatter value (VH) is extracted 
+// at each station location using the reduceRegion function. This value is stored alongside 
+// the station's date and name for later use.
+var extractVH = function(image) {
+  var date = image.date().format('YYYY-MM-dd');
+
+  // Extract VH value at each station point
+  var extracted = stationsWithGeometry.map(function(station) {
+    var stationName = station.get('station_name');
+
+    // Extract exact VH backscatter value at the point
+    var vhValue = image.select('VH').reduceRegion({
+      reducer: ee.Reducer.first(), // Exact pixel value
+      geometry: station.geometry(),
+      scale: 30, // Sentinel-1 spatial resolution
+      maxPixels: 1e9
+    }).get('VH');
+
+    // Handle missing VH values with default -9999
+    vhValue = ee.Algorithms.If(
+      vhValue, // Check if VH value exists
+      vhValue, // Use the valid VH dB value directly
+      -9999    // Set -9999 for missing values
+    );
+
+    return station.set({
+      'date': date,
+      'station_name': stationName,
+      'backscatter_dB': vhValue
+    });
+  });
+
+  return extracted;
+};
+
+
+// Step 10: Apply the extraction function to the filtered Sentinel-1 collection
+// The extraction function is applied to each image in the collection. The resulting values 
+// are flattened into a single collection for easier export.
+var extractedCollection = filtered_s1.map(extractVH).flatten();
+var extractedTable = ee.FeatureCollection(extractedCollection).select(['date', 'station_name', 'backscatter_dB']);
+
+// Step 11: Export extracted values to Google Drive
+// The extracted backscatter values are exported as a CSV file to Google Drive for further 
+// analysis. The data is organized by station, date, and backscatter value.
+// Use evaluate() to retrieve the selected orbit value
+listOrbits.get(1).evaluate(function(selectedOrbitValue) { //CHange the number of choosen orbits according to the LIST!
+  // Now we can use selectedOrbitValue in the export file name
+  var exportDescription = 'Orbit_' + selectedOrbitValue;  // Simple file name with orbit number and platform
+  
+  // Perform the export with the evaluated file name
+  Export.table.toDrive({
+    collection: extractedTable,
+    description: exportDescription,  // File name with orbit number and platform
+    folder: 'GEE_Exports', //user defined
+    fileFormat: 'CSV'
+  });
+});
