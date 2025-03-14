@@ -22,12 +22,12 @@ This script operates on preprocessed Sentinel-1 data and allows:
 ## Usage Instructions
 ### Running the Script in Google Earth Engine
 1. Open the Google Earth Engine Code Editor.
-2. Load the script from the following link:  
-   [Run Script on GEE](https://code.earthengine.google.com/your_script_id_here](https://code.earthengine.google.com/6f3fe5ff1c04036bd7cd0d7530426ac7))
-3. Define your Region of Interest (ROI) and station locations.
-4. Set the required filters for orbit, platform, and date range.
-5. Run the script to extract backscatter values.
-6. Export the results as a CSV file to Google Drive.
+2. Load the script from the following link:
+   [Run Script on GEE](https://code.earthengine.google.com/6f3fe5ff1c04036bd7cd0d7530426ac7)
+4. Define your Region of Interest (ROI) and station locations.
+5. Set the required filters for orbit, platform, and date range.
+6. Run the script to extract backscatter values.
+7. Export the results as a CSV file to Google Drive.
 
 ## Output
 The output file will be in CSV format and include:
